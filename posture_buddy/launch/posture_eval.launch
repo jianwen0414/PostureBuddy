@@ -1,0 +1,16 @@
+<launch>
+
+  <!-- Module 2: Posture Classification ───────────────────────────────────────
+       Subscribes to /user_kinematics (from pose_estimation_node).
+       Publishes   to /posture_status  ("GOOD", "BAD", or "ABSENT").
+
+       Run alongside pose_estimation.launch, or include this file from a
+       top-level launch that boots the full pipeline.
+  -->
+  <node pkg="posture_buddy"
+        type="posture_eval_node.py"
+        name="posture_eval_node"
+        output="screen"
+        required="true" />
+
+</launch>
