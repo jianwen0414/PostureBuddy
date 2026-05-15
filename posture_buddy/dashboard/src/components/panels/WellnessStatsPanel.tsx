@@ -1,6 +1,6 @@
 'use client'
 
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
+import { PieChart, Pie, Cell, Tooltip } from 'recharts'
 import { useDashboardStore } from '@/store/useDashboardStore'
 import StatCard from '@/components/shared/StatCard'
 import { formatSeconds } from '@/lib/formatters'
@@ -29,8 +29,7 @@ export default function WellnessStatsPanel() {
 
       <div className="flex items-center gap-6 mb-4">
         <div className="flex-shrink-0 w-28 h-28">
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
+          <PieChart width={112} height={112}>
               <Pie
                 data={data}
                 dataKey="value"
@@ -62,7 +61,6 @@ export default function WellnessStatsPanel() {
                 />
               )}
             </PieChart>
-          </ResponsiveContainer>
         </div>
 
         <div className="flex flex-col">
