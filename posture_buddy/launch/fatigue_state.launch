@@ -1,0 +1,16 @@
+<launch>
+
+  <!-- Module 3: Temporal Logic & Fatigue Engine ──────────────────────────────
+       Subscribes to /posture_status (from posture_eval_node).
+       Publishes   to /fatigue_metrics (for Dashboard) 
+                   and /hri_triggers (for Speaker/LEDs).
+
+       Run this alongside posture_eval.launch, or include it in the core setup.
+  -->
+  <node pkg="posture_buddy"
+        type="fatigue_state_node.py"
+        name="fatigue_state_node"
+        output="screen"
+        required="true" />
+
+</launch>
