@@ -1,0 +1,33 @@
+<launch>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       PostureBuddy — Full Pipeline Launch
+       Boots all 4 ROS modules in dependency order, then starts the rosbridge
+       WebSocket server so the Next.js dashboard can connect.
+
+       Usage:
+         roslaunch posture_buddy posture_buddy.launch
+
+       Prerequisites:
+         sudo apt install ros-noetic-usb-cam
+         sudo apt install ros-noetic-rosbridge-suite
+  ═══════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Module 1: Vision & Kinematics (includes usb_cam driver) -->
+  <include file="$(find posture_buddy)/launch/pose_estimation.launch" />
+
+  <!-- Module 2: Posture Classification -->
+  <include file="$(find posture_buddy)/launch/posture_eval.launch" />
+
+  <!-- Module 3: Temporal Logic & Fatigue Engine -->
+  <include file="$(find posture_buddy)/launch/fatigue_state.launch" />
+
+  <!-- Module 4: HRI & Actuation -->
+  <include file="$(find posture_buddy)/launch/feedback_controller.launch" />
+
+  <!-- rosbridge WebSocket server — dashboard connects to ws://<robot-ip>:9090 -->
+  <include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch">
+    <arg name="port" value="9090" />
+  </include>
+
+</launch>

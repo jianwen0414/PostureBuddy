@@ -1,0 +1,16 @@
+<launch>
+
+  <!-- Module 4: HRI & Actuation ───────────────────────────────────────────────
+       Subscribes to /hri_triggers (from fatigue_state_node).
+       Publishes   to /hri_execution_status (for Dashboard).
+
+       Run alongside the other module launches, or include this file from the
+       top-level posture_buddy.launch that boots the full pipeline.
+  -->
+  <node pkg="posture_buddy"
+        type="feedback_controller_node.py"
+        name="feedback_controller_node"
+        output="screen"
+        required="true" />
+
+</launch>

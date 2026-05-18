@@ -34,6 +34,8 @@ catkin_package(
 catkin_install_python(PROGRAMS
   src/pose_estimation_node.py
   src/posture_eval_node.py
+  src/fatigue_state_node.py
+  src/feedback_controller_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
