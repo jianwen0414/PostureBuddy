@@ -98,7 +98,7 @@ rosmsg show posture_buddy/HriStatus
 ### 3. Make node scripts executable
 
 ```bash
-chmod +x ~/catkin_ws/src/posture_buddy/src/*.py
+chmod +x ~/catkin_ws/src/PostureBuddy/posture_buddy/src/*.py
 ```
 
 ---
