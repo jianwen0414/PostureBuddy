@@ -62,18 +62,10 @@ class FeedbackControllerNode:
             self._cmd_vel_pub = None
 
         # TTS queue & worker
+        # pyttsx3 is intentionally NOT initialised here — it must be created on
+        # the same thread that calls runAndWait() (Linux/espeak GLib loop is
+        # not thread-safe). Initialisation happens inside _tts_worker instead.
         self._tts_queue = queue.Queue()
-        if TTS_AVAILABLE:
-            try:
-                self._tts_engine = pyttsx3.init()
-                # Optional engine property tweaks (volume, rate) can go here:
-                # self._tts_engine.setProperty('rate', 150)
-            except Exception as e:
-                rospy.logerr('[feedback_controller_node] pyttsx3 init failed: %s', e)
-                self._tts_engine = None
-        else:
-            rospy.logwarn('[feedback_controller_node] pyttsx3 not available; falling back to logs.')
-            self._tts_engine = None
 
         self._tts_thread = threading.Thread(target=self._tts_worker, daemon=True)
         self._tts_thread.start()
@@ -119,6 +111,19 @@ class FeedbackControllerNode:
 
     # ── TTS worker ────────────────────────────────────────────────────────────
     def _tts_worker(self):
+        # Initialise pyttsx3 here so engine lives on this thread.
+        # On Linux the espeak driver uses a GLib event loop that must be driven
+        # by the same thread that created it — cross-thread use hangs/crashes.
+        tts_engine = None
+        if TTS_AVAILABLE:
+            try:
+                tts_engine = pyttsx3.init()
+            except Exception as e:
+                rospy.logerr('[feedback_controller_node] pyttsx3 init failed: %s', e)
+
+        if not tts_engine:
+            rospy.logwarn('[feedback_controller_node] pyttsx3 not available; falling back to logs.')
+
         while not rospy.is_shutdown():
             try:
                 code, text = self._tts_queue.get(timeout=0.5)
@@ -136,15 +141,14 @@ class FeedbackControllerNode:
                     rospy.logwarn('[feedback_controller_node] attention wiggle failed: %s', e)
 
             # Speak (or log fallback)
-            if self._tts_engine:
+            if tts_engine:
                 try:
-                    self._tts_engine.say(text)
-                    self._tts_engine.runAndWait()
+                    tts_engine.say(text)
+                    tts_engine.runAndWait()
                 except Exception as e:
                     rospy.logerr('[feedback_controller_node] TTS error: %s', e)
             else:
                 rospy.loginfo('[feedback_controller_node] TTS (log fallback): %s', text)
-                # Small pause to simulate speaking duration
                 time.sleep(min(max(len(text) * 0.03, 0.5), 3.0))
 
             self._is_speaking = False
