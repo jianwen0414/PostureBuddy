@@ -17,7 +17,7 @@ function CornerBrackets({ color = 'border-violet-500/40' }: { color?: string }) 
 
 function NoSignalState({ topicName }: { topicName: string }) {
   return (
-    <div className="relative flex flex-1 flex-col items-center justify-center min-h-[200px] overflow-hidden">
+    <div className="relative flex w-full flex-col items-center justify-center aspect-[4/3] overflow-hidden">
       {/* CRT grid overlay */}
       <div
         className="absolute inset-0 pointer-events-none"
@@ -85,7 +85,7 @@ function NoSignalState({ topicName }: { topicName: string }) {
 
 function LiveFeedState({ frame, topicName }: { frame: string; topicName: string }) {
   return (
-    <div className="relative flex-1 min-h-[200px] overflow-hidden rounded-lg animate-camera-acquire">
+    <div className="relative w-full aspect-[4/3] overflow-hidden rounded-lg animate-camera-acquire">
       {/* The actual camera image */}
       <img
         src={frame}
@@ -137,7 +137,7 @@ export default function CameraFeedPanel() {
   const cameraTopicName = useDashboardStore((s) => s.cameraTopicName)
 
   return (
-    <div className="relative flex flex-col overflow-hidden rounded-xl border border-t-2 border-t-violet-400 border-slate-700/50 bg-slate-950 p-3 shadow-xl shadow-violet-500/5 min-h-[260px]">
+    <div className="relative flex flex-col overflow-hidden rounded-xl border border-t-2 border-t-violet-400 border-slate-700/50 bg-slate-950 p-3 shadow-xl shadow-violet-500/5">
       {/* Panel header */}
       <div className="flex items-center justify-between mb-3 px-1">
         <span className="text-xs font-display font-semibold uppercase tracking-widest text-slate-400">

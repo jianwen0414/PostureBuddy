@@ -77,7 +77,7 @@ class FeedbackControllerNode:
         rospy.Subscriber('/hri_triggers', Int32, self._trigger_cb)
 
         rospy.loginfo('[feedback_controller_node] Ready. Waiting for /hri_triggers ... (enable_cmd_vel=%s, tts_ok=%s)',
-                    self._enable_cmd_vel, bool(self._tts_engine))
+                    self._enable_cmd_vel, TTS_AVAILABLE)
 
     # ── Trigger callback ──────────────────────────────────────────────────────
     def _trigger_cb(self, msg):

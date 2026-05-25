@@ -77,9 +77,9 @@ class PoseEstimationNode:
         self._pub = rospy.Publisher('/user_kinematics', Kinematics, queue_size=10)
 
         # Subscriber last — all state is initialised before any callback fires
-        rospy.Subscriber('/camera/image_raw', Image, self._image_cb)
+        rospy.Subscriber('/usb_cam/image_raw', Image, self._image_cb)
 
-        rospy.loginfo('[pose_estimation_node] Ready. Waiting for /camera/image_raw ...')
+        rospy.loginfo('[pose_estimation_node] Ready. Waiting for /usb_cam/image_raw ...')
 
     # ── Image callback ────────────────────────────────────────────────────────
     def _image_cb(self, msg):

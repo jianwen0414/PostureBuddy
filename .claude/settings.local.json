@@ -4,7 +4,11 @@
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\Jian Wen Lee\\\\PostureBuddy\" -Recurse -Force)",
       "Bash(Select-Object -Property FullName, PSIsContainer)",
       "Bash(Sort-Object FullName)",
-      "Bash(ConvertTo-Json -Depth 100)"
+      "Bash(ConvertTo-Json -Depth 100)",
+      "Bash(rostopic hz *)",
+      "Bash(kill %1)",
+      "Bash(rostopic list *)",
+      "Bash(python3 *)"
     ]
   }
 }

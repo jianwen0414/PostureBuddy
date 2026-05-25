@@ -1,7 +1,9 @@
-.claude/
+.claude/*
 
 # Python cache
 __pycache__/
 *.py[cod]
 
+CLAUDE.md
 
+.vscode/
