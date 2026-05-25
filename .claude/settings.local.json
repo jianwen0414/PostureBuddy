@@ -8,7 +8,10 @@
       "Bash(rostopic hz *)",
       "Bash(kill %1)",
       "Bash(rostopic list *)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(npx tsc *)",
+      "Bash(npx next *)",
+      "Bash(npm run *)"
     ]
   }
 }

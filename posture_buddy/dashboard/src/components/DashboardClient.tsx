@@ -10,7 +10,7 @@ export default function DashboardClient() {
   useRosBridge(WS_URL)
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <div className="flex h-screen flex-col overflow-hidden">
       <Header />
       <DashboardGrid />
     </div>

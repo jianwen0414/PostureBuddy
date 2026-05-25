@@ -2,7 +2,8 @@
 
 import { useDashboardStore } from '@/store/useDashboardStore'
 import PulsingDot from '@/components/shared/PulsingDot'
-import type { ConnectionState } from '@/types/ros'
+import { formatSeconds } from '@/lib/formatters'
+import type { ConnectionState, SystemStatus } from '@/types/ros'
 
 const CONNECTION_CONFIG: Record<ConnectionState, { label: string; color: 'green' | 'amber' | 'red'; textColor: string }> = {
   connected:    { label: 'Live',         color: 'green', textColor: 'text-emerald-400' },
@@ -11,33 +12,58 @@ const CONNECTION_CONFIG: Record<ConnectionState, { label: string; color: 'green'
   error:        { label: 'Error',        color: 'red',   textColor: 'text-red-400' },
 }
 
+const STATUS_CONFIG: Record<SystemStatus, { color: 'green' | 'amber' | 'red' | 'gray'; textColor: string; ring: string }> = {
+  Idle:     { color: 'gray',  textColor: 'text-slate-400', ring: 'ring-slate-700/60' },
+  Speaking: { color: 'green', textColor: 'text-sky-300',   ring: 'ring-sky-500/40' },
+  Alert:    { color: 'red',   textColor: 'text-red-300',   ring: 'ring-red-500/40' },
+}
+
 export default function Header() {
   const connectionState = useDashboardStore((s) => s.connectionState)
-  const cfg = CONNECTION_CONFIG[connectionState]
+  const systemStatus = useDashboardStore((s) => s.systemStatus)
+  const goodPct = useDashboardStore((s) => s.wellnessStats.goodPosturePct)
+  const sessionSec = useDashboardStore((s) => s.sessionTimeSec)
+
+  const conn = CONNECTION_CONFIG[connectionState]
+  const status = STATUS_CONFIG[systemStatus]
 
   return (
-    <header className="sticky top-0 z-50 flex items-center justify-between px-6 py-3 bg-slate-900/80 backdrop-blur-md border-b border-slate-800/80">
-      <div className="flex items-center gap-3">
-        <span className="text-xl" aria-hidden>🤖</span>
-        <div className="flex flex-col leading-tight">
-          <span className="text-base font-display font-black tracking-tight text-slate-100">
+    <header className="flex flex-shrink-0 items-center justify-between gap-4 border-b border-slate-800/80 bg-slate-900/80 px-5 py-2 backdrop-blur-md">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500/30 to-cyan-500/20 ring-1 ring-violet-400/30">
+          <span className="text-base" aria-hidden>🤖</span>
+        </div>
+        <div className="hidden sm:flex flex-col leading-tight">
+          <span className="text-sm font-display font-black tracking-tight text-slate-100">
             PostureBuddy
           </span>
-          <span className="text-xs font-display text-slate-500 tracking-wide">
-            Module 5 — Telemetry
+          <span className="text-[10px] font-display text-slate-500 tracking-widest uppercase">
+            Workspace Wellness Monitor
           </span>
         </div>
-        <div className="hidden sm:block h-6 w-px bg-slate-700 mx-1" />
-        <span className="hidden sm:block text-xs font-display text-slate-600 tracking-wider uppercase">
-          Workspace Wellness Monitor
-        </span>
       </div>
 
-      <div className="flex items-center gap-2">
-        <PulsingDot color={cfg.color} />
-        <span className={`text-xs font-display font-semibold ${cfg.textColor}`}>
-          {cfg.label}
-        </span>
+      <div className="flex items-center gap-2 sm:gap-3 text-xs">
+        <div className="flex items-center gap-2 rounded-md bg-slate-800/60 px-3 py-1.5 ring-1 ring-slate-700/60">
+          <span className="text-[10px] font-display uppercase tracking-widest text-slate-500">Session</span>
+          <span className="font-data font-bold tabular-nums text-slate-100">{formatSeconds(sessionSec)}</span>
+        </div>
+        <div className="hidden md:flex items-center gap-2 rounded-md bg-slate-800/60 px-3 py-1.5 ring-1 ring-slate-700/60">
+          <span className="text-[10px] font-display uppercase tracking-widest text-slate-500">Good</span>
+          <span className="font-data font-bold tabular-nums text-cyan-300">{goodPct}%</span>
+        </div>
+        <div className={`flex items-center gap-2 rounded-md bg-slate-800/60 px-3 py-1.5 ring-1 ${status.ring}`}>
+          <PulsingDot color={status.color} size="sm" />
+          <span className={`text-[10px] font-display font-bold tracking-widest uppercase ${status.textColor}`}>
+            {systemStatus}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 rounded-md bg-slate-800/60 px-3 py-1.5 ring-1 ring-slate-700/60">
+          <PulsingDot color={conn.color} size="sm" />
+          <span className={`text-[10px] font-display font-bold tracking-widest uppercase ${conn.textColor}`}>
+            {conn.label}
+          </span>
+        </div>
       </div>
     </header>
   )
