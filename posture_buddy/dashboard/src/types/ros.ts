@@ -53,6 +53,20 @@ export interface WellnessStats {
   totalBadSec: number
 }
 
+/**
+ * One sample of session telemetry captured every time M3 publishes a fatigue
+ * update (~1 Hz). Used to draw the live timeline chart and the post-session
+ * report. Bounded ring so memory stays flat over long sessions.
+ */
+export interface TimelineSample {
+  t: number
+  sessionSec: number
+  goodPct: number
+  badRollingSec: number
+  fatigueLevel: FatigueLevel
+  posture: PostureState
+}
+
 export interface RosCompressedImageMsg {
   format: string
   data: string

@@ -6,6 +6,7 @@ import WellnessStatsPanel from '@/components/panels/WellnessStatsPanel'
 import DegradationPanel from '@/components/panels/DegradationPanel'
 import AlertFeedPanel from '@/components/panels/AlertFeedPanel'
 import CameraFeedPanel from '@/components/panels/CameraFeedPanel'
+import SessionTimelinePanel from '@/components/panels/SessionTimelinePanel'
 
 /**
  * Viewport-fit layout (lg+): camera section is height-bound and locked to
@@ -30,6 +31,8 @@ export default function DashboardGrid() {
           </div>
 
           <WellnessStatsPanel />
+
+          <SessionTimelinePanel />
 
           <div className="flex-1 min-h-0">
             <AlertFeedPanel />
