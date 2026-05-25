@@ -19,6 +19,9 @@ from posture_buddy.msg import PostureStatus, FatigueMetrics
 ROLLING_WINDOW_SEC       = 120.0  # 2 minutes rolling window for 'bad sec' calculation
 HYSTERESIS_DELAY_SEC     = 10.0   # Require 10s of sustained score to flip fatigue level
 MAX_ABSENCE_RESET_SEC    = 60.0   # Reset session if absent for 60 seconds
+BAD_STREAK_ALERT_SEC     = 30.0   # Continuous BAD streak that fires trigger 2 directly
+                                  # (independent of cumulative fatigue score — this is
+                                  # a real-time "sit up NOW" prompt, not a fatigue cue)
 
 class FatigueStateNode:
     def __init__(self):
@@ -152,8 +155,15 @@ class FatigueStateNode:
         if self.trigger_cooldown > 0:
             self.trigger_cooldown -= dt
         else:
-            if self.current_fatigue_level == "HIGH":
-                trigger_code = 2  # Urgent Correction
+            # Real-time correction prompt: continuous BAD streak ≥ 30s fires
+            # trigger 2 directly. This is intentionally decoupled from the
+            # cumulative fatigue score — slouching for 30s straight is a
+            # "fix it now" signal, not a "you've been tired for a while" cue.
+            if self.current_bad_streak_sec >= BAD_STREAK_ALERT_SEC:
+                trigger_code = 2  # Urgent Correction (streak-driven)
+                self.trigger_cooldown = 15.0
+            elif self.current_fatigue_level == "HIGH":
+                trigger_code = 2  # Urgent Correction (fatigue-driven)
                 self.trigger_cooldown = 15.0
             elif self.current_fatigue_level == "MEDIUM":
                 trigger_code = 1  # Stretch Reminder
