@@ -119,6 +119,13 @@ function LiveFeedState({ frame, topicName }: { frame: string; topicName: string 
       {/* Corner brackets on top of image */}
       <CornerBrackets color="border-violet-400/60" />
 
+      {/* Skeleton-overlay caption — explains what the colored lines mean */}
+      <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-sm border border-violet-500/30 rounded px-2 py-1 z-10">
+        <span className="text-violet-200 text-[10px] font-data tracking-wider uppercase">
+          neck &amp; spine vectors
+        </span>
+      </div>
+
       {/* Bottom info bar */}
       <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2 bg-gradient-to-t from-black/80 to-transparent z-10">
         <span className="text-slate-400 text-xs font-data truncate">{topicName}</span>
@@ -141,7 +148,7 @@ export default function CameraFeedPanel() {
       {/* Panel header */}
       <div className="flex items-center justify-between mb-3 px-1">
         <span className="text-xs font-display font-semibold uppercase tracking-widest text-slate-400">
-          Camera Feed
+          Camera Feed · Skeleton Overlay
         </span>
         <div className="flex items-center gap-2">
           {cameraFrame ? (
