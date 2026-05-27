@@ -197,6 +197,20 @@ npm run dev
 
 Open `http://localhost:3000` in a browser.
 
+### Dashboard panels
+
+| Panel | Description |
+|-------|-------------|
+| Camera Feed | Live compressed camera stream with MediaPipe skeleton overlay |
+| Posture Status | Current state (GOOD / BAD / ABSENT) with colour coding |
+| Fatigue Level | Gauge ring showing current fatigue level (LOW / MEDIUM / HIGH) |
+| Degradation | Rolling bad-posture score for the current 2-minute window |
+| Wellness Stats | Session totals — good time, bad time, good-posture percentage |
+| Session Timeline | Per-second fatigue history chart |
+| Alert Feed | Timestamped log of every stretch and correction alert fired |
+
+The **Session Report** is an on-demand modal separate from the panels. It shows a posture grade (A–F), key stats, alert breakdown by type, a fatigue distribution bar across the session, and a personalised recommendation. Trigger it via the **Report** button in the header.
+
 ---
 
 ## Running Individual Modules (Development)
@@ -221,13 +235,30 @@ roslaunch posture_buddy feedback_controller.launch
 
 ## Tunable Parameters
 
-| File | Constant | Default | Effect |
-|------|----------|---------|--------|
-| `pose_estimation_node.py` | `MIN_VISIBILITY` | `0.5` | MediaPipe landmark confidence gate |
-| `posture_eval_node.py` | `NECK_ANGLE_BAD_DEG` | `20.0°` | Max acceptable forward head tilt |
-| `posture_eval_node.py` | `SPINE_ANGLE_BAD_DEG` | `15.0°` | Max acceptable spine lean |
-| `fatigue_state_node.py` | `ROLLING_WINDOW_SEC` | `120` | Rolling bad-posture window (seconds) |
-| `fatigue_state_node.py` | `MAX_ABSENCE_RESET_SEC` | `60` | Absence duration before session resets |
+**`pose_estimation_node.py`**
+
+| Constant | Default | Effect |
+|----------|---------|--------|
+| `MIN_VISIBILITY` | `0.35` | MediaPipe landmark visibility gate — lower values tolerate partially occluded landmarks |
+| `ANGLE_EMA_ALPHA` | `0.55` | EMA smoothing factor for per-frame angle jitter (`1.0` = no smoothing) |
+| `SIDE_SWITCH_MARGIN` | `0.30` | Aggregate visibility margin the non-active side must exceed before a left/right switch is allowed |
+
+**`posture_eval_node.py`**
+
+| Constant | Default | Effect |
+|----------|---------|--------|
+| `NECK_ANGLE_BAD_DEG` | `20.0°` | Max acceptable forward head tilt |
+| `SPINE_ANGLE_BAD_DEG` | `15.0°` | Max acceptable spine lean |
+| `DEBOUNCE_FRAMES` | `3` | Consecutive frames a candidate state must hold before publishing (~0.3 s at 10 Hz) |
+
+**`fatigue_state_node.py`**
+
+| Constant | Default | Effect |
+|----------|---------|--------|
+| `ROLLING_WINDOW_SEC` | `120` | Rolling bad-posture window (seconds) |
+| `HYSTERESIS_DELAY_SEC` | `10` | Seconds a new fatigue score must be sustained before the fatigue level flips |
+| `MAX_ABSENCE_RESET_SEC` | `60` | Absence duration before session resets |
+| `BAD_STREAK_ALERT_SEC` | `30` | Continuous slouch streak (seconds) that fires an urgent correction alert regardless of cumulative fatigue score |
 
 ---
 
