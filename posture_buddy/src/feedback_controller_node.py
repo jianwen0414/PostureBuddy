@@ -27,6 +27,8 @@ from geometry_msgs.msg import Twist
 import threading
 import time
 import queue
+from collections import deque
+from typing import Optional
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 try:
@@ -47,15 +49,30 @@ try:
     from openai import OpenAI as _OpenAIClient
     import os as _os
     from dotenv import load_dotenv as _load_dotenv
-    _load_dotenv()
+    # Resolve .env relative to THIS file, not the process cwd — roslaunch/rosrun
+    # often start the node from a different working directory, which otherwise
+    # causes load_dotenv() to silently find nothing and leave the API key unset.
+    _env_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.env')
+    _load_dotenv(dotenv_path=_env_path)
+    _api_key = _os.getenv("OPENROUTER_API_KEY")
+    if not _api_key:
+        raise RuntimeError(
+            f"OPENROUTER_API_KEY not set (looked for .env at {_env_path}). "
+            "Check the file exists there and contains OPENROUTER_API_KEY=..."
+        )
     _openrouter_client = _OpenAIClient(
         base_url="https://openrouter.ai/api/v1",
-        api_key=_os.getenv("OPENROUTER_API_KEY"),
+        api_key=_api_key,
     )
     DEEPSEEK_AVAILABLE = True   # keeping the flag name so rest of code is unchanged
-except ImportError:
+except ImportError as _imp_exc:
     _openrouter_client = None
     DEEPSEEK_AVAILABLE = False
+    print(f'[feedback_controller_node] DeepSeek disabled — missing package: {_imp_exc}')
+except Exception as _setup_exc:
+    _openrouter_client = None
+    DEEPSEEK_AVAILABLE = False
+    print(f'[feedback_controller_node] DeepSeek disabled — setup error: {_setup_exc}')
 
 # Model slug on OpenRouter
 _DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash"
@@ -65,8 +82,17 @@ _DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash"
 MAX_TURNS = 5
 # Seconds to wait for the user to speak before giving up.
 LISTEN_TIMEOUT_SEC = 8
-# Phrases that end the conversation immediately when the user says them.
-CLOSING_PHRASES = {"ok", "okay", "thanks", "thank you", "bye", "done", "got it", "alright"}
+
+# ── Wake-word (user-initiated) conversation tuning ────────────────────────────
+# Phrases that start a user-initiated conversation when heard while idle.
+# Simple substring match on the STT transcript — no extra wake-word engine needed.
+WAKE_PHRASES = {"hey posture buddy", "posture buddy", "hey posturebuddy"}
+# Short listen window used while idly polling for the wake phrase, so the loop
+# stays responsive and doesn't hog the mic lock for long stretches.
+WAKE_LISTEN_TIMEOUT_SEC = 4
+# A virtual "trigger code" used only to pick a system prompt for user-initiated
+# conversations — does not correspond to a real /hri_triggers value.
+TRIGGER_USER_INITIATED = -1
 
 # ── Trigger code definitions (must match fatigue_state_node) ──────────────────
 TRIGGER_IDLE              = 0
@@ -96,6 +122,23 @@ class FeedbackControllerNode:
         self._stretch_check_started  = None
         self._stretch_retry_count    = 0
 
+        # Rolling record of the 10 most recently COMPLETED conversations
+        # (kept separate from the live _conversation_history, which only
+        # reflects whatever conversation is currently in progress). Each
+        # entry is {'source': 'trigger'|'wakeword', 'trigger_code': int,
+        # 'lines': [...], 'ended_at': rospy time}. Oldest is dropped once
+        # the 10th new one is added — this never gets wiped wholesale.
+        self._conversation_log = deque(maxlen=10)
+
+        # Coordination for folding a trigger into an ongoing wake-word
+        # conversation instead of starting a competing one. (Both conversation
+        # types now run on the SAME worker thread/mic/TTS engine — see
+        # _conversation_worker — so no cross-thread mic lock is needed.)
+        self._conversation_active = False          # True while a conversation is in progress
+        self._conversation_source = None            # 'trigger' or 'wakeword'
+        self._state_lock = threading.Lock()          # guards the two fields above
+        self._pending_trigger_note = None            # text to fold into the wake-word chat
+
         # Publishers
         self._pub = rospy.Publisher('/hri_execution_status', HriStatus, queue_size=10)
 
@@ -106,14 +149,19 @@ class FeedbackControllerNode:
         else:
             self._cmd_vel_pub = None
 
-        # TTS queue & worker
+        # TTS queue & single worker thread.
+        # IMPORTANT: pyttsx3 and the speech_recognition Microphone/PortAudio
+        # backend are NOT safe to initialise twice (two engine/PyAudio
+        # instances in the same process can segfault). Both trigger-driven
+        # AND wake-word conversations therefore run on this ONE thread,
+        # sharing a single pyttsx3 engine and a single Microphone/Recognizer.
         # pyttsx3 is intentionally NOT initialised here — it must be created on
         # the same thread that calls runAndWait() (Linux/espeak GLib loop is
-        # not thread-safe). Initialisation happens inside _tts_worker instead.
+        # not thread-safe). Initialisation happens inside _conversation_worker.
         self._tts_queue = queue.Queue()
 
-        self._tts_thread = threading.Thread(target=self._tts_worker, daemon=True)
-        self._tts_thread.start()
+        self._worker_thread = threading.Thread(target=self._conversation_worker, daemon=True)
+        self._worker_thread.start()
 
         # Heartbeat so the dashboard always has fresh data
         rospy.Timer(rospy.Duration(1.0), self._heartbeat_cb)
@@ -131,6 +179,44 @@ class FeedbackControllerNode:
             self._enable_cmd_vel, TTS_AVAILABLE, STT_AVAILABLE, DEEPSEEK_AVAILABLE,
         )
 
+    # ── Shared conversation-state helpers ─────────────────────────────────────
+    def _archive_current_conversation(self, source: str, trigger_code: int):
+        """
+        Save a snapshot of the just-finished conversation into the rolling
+        10-entry log. Skips empty conversations (e.g. a trigger fired but the
+        worker never got a chance to say anything before shutdown).
+        """
+        if not self._conversation_history:
+            return
+        self._conversation_log.append({
+            'source': source,
+            'trigger_code': trigger_code,
+            'lines': list(self._conversation_history),
+            'ended_at': rospy.Time.now().to_sec(),
+        })
+
+    def _try_claim_conversation(self, source: str) -> bool:
+        """
+        Attempt to mark a conversation as active for `source` ('trigger' or
+        'wakeword'). Returns False if one is already running from either
+        source — callers must not proceed with a new conversation in that case.
+        """
+        with self._state_lock:
+            if self._conversation_active:
+                return False
+            self._conversation_active = True
+            self._conversation_source = source
+            return True
+
+    def _release_conversation(self):
+        with self._state_lock:
+            self._conversation_active = False
+            self._conversation_source = None
+
+    def _conversation_source_is(self, source: str) -> bool:
+        with self._state_lock:
+            return self._conversation_active and self._conversation_source == source
+
     # ── Trigger callback ──────────────────────────────────────────────────────
     def _trigger_cb(self, msg):
         code = msg.data
@@ -142,15 +228,56 @@ class FeedbackControllerNode:
         label = TRIGGER_LABELS.get(code, f'Unknown trigger {code}')
         rospy.logwarn('[feedback_controller_node] Received trigger %d (%s)', code, label)
 
-        self._last_executed_trigger = code
-        self._last_robot_message = ''
-        self._last_user_message = ''
-        self._conversation_history = []
-
         if code == TRIGGER_STRETCH_REMINDER:
             self._stretch_check_active = True
             self._stretch_check_started = rospy.Time.now()
             self._stretch_retry_count = 0
+
+        # If the user is already mid-conversation (because they started it
+        # themselves with the wake phrase), don't barge in with a separate
+        # conversation — just fold a short reminder note into the ongoing one.
+        # The wake-word loop picks this up on its next DeepSeek call.
+        if self._conversation_source_is('wakeword'):
+            note = {
+                TRIGGER_STRETCH_REMINDER: (
+                    "[System note: the user has been sitting too long — "
+                    "gently work in a suggestion that they stand and stretch soon.]"
+                ),
+                TRIGGER_POSTURE_ALERT: (
+                    "[System note: the user's posture has become poor — "
+                    "gently remind them to sit up straight.]"
+                ),
+            }.get(code)
+            if note:
+                self._pending_trigger_note = note
+                rospy.loginfo(
+                    '[feedback_controller_node] Folding trigger %d into ongoing '
+                    'wake-word conversation instead of starting a new one.', code,
+                )
+            return
+
+        # If a trigger-driven conversation is already in progress, just queue
+        # this new trigger for whenever the current one finishes — do NOT
+        # touch _conversation_history / _last_robot_message / publish here.
+        # Wiping mid-conversation was causing the dashboard to blank out
+        # while the bot was still actively speaking/listening. The actual
+        # reset for a fresh conversation happens inside
+        # _run_trigger_conversation, right as that conversation begins.
+        if self._conversation_source_is('trigger'):
+            try:
+                self._tts_queue.put_nowait(code)
+                rospy.loginfo(
+                    '[feedback_controller_node] Trigger %d queued — a conversation '
+                    'is already in progress, will run after it finishes.', code,
+                )
+            except queue.Full:
+                rospy.logwarn('[feedback_controller_node] TTS queue full; dropping trigger.')
+            return
+
+        self._last_executed_trigger = code
+        self._last_robot_message = ''
+        self._last_user_message = ''
+        self._conversation_history = []
 
         # Push trigger to TTS/conversation worker (non-blocking).
         # The worker itself calls DeepSeek for the opening line and then
@@ -188,23 +315,26 @@ class FeedbackControllerNode:
             except queue.Full:
                 rospy.logwarn('[feedback_controller_node] Stretch re-check queue full; skipping reminder.')
 
-    # ── TTS / conversation worker ─────────────────────────────────────────────
-    def _tts_worker(self):
+    # ── Conversation worker (single thread — owns the ONE pyttsx3 engine and
+    # ONE microphone/recogniser for the whole node) ───────────────────────────
+    def _conversation_worker(self):
         """
-        Runs on its own thread. Owns the pyttsx3 engine and the microphone
-        recogniser. For each trigger code it receives:
+        Runs on its own thread for the lifetime of the node. Owns the single
+        pyttsx3 engine and the single speech_recognition Microphone/Recognizer
+        used by BOTH trigger-driven and wake-word-initiated conversations.
 
-          1. Opens a fresh DeepSeek chat session with a role-defining system prompt.
-          2. Loops up to MAX_TURNS:
-               a. Asks DeepSeek for the next thing to say.
-               b. Speaks it via pyttsx3 (or logs it as fallback).
-               c. Listens for the user's reply via the microphone.
-               d. Feeds the reply back into the DeepSeek chat history.
-               e. Checks whether the conversation should end.
-          3. Resets state and waits for the next trigger.
+        IMPORTANT: pyttsx3 (espeak/GLib backend) and PortAudio (used by
+        speech_recognition's Microphone) are not safe to initialise more than
+        once in a process — doing so from two threads previously caused a
+        hard segfault. So there is exactly one of each, created here, and
+        every conversation (trigger or wake-word) goes through this loop.
 
-        pyttsx3 MUST be initialised here — the GLib event loop it uses on
-        Linux is NOT thread-safe across threads.
+        Each pass:
+          1. Checks the trigger queue (non-blocking). If a trigger is
+             waiting, run a full trigger-driven conversation.
+          2. Otherwise, if idle, do one short listen for the wake phrase.
+             If heard, run a full user-initiated conversation.
+          3. Either way, loop back and repeat.
         """
         # ── pyttsx3 init ──────────────────────────────────────────────────────
         tts_engine = None
@@ -231,74 +361,180 @@ class FeedbackControllerNode:
                 rospy.logerr('[feedback_controller_node] Microphone init failed: %s', exc)
                 recogniser = microphone = None
 
+        if recogniser is not None and microphone is not None:
+            rospy.loginfo(
+                '[feedback_controller_node] Wake-word listening active (phrases: %s).',
+                ', '.join(sorted(WAKE_PHRASES)),
+            )
+        else:
+            rospy.logwarn(
+                '[feedback_controller_node] STT unavailable — wake-word listening disabled '
+                '(trigger-driven conversations still work via TTS-only fallback).'
+            )
+
         # ── main loop ─────────────────────────────────────────────────────────
         while not rospy.is_shutdown():
-            # Block until a trigger code arrives.
+            # -- 1. Trigger-driven conversation takes priority -------------------
+            code = None
             try:
-                code = self._tts_queue.get(timeout=0.5)
+                code = self._tts_queue.get_nowait()
+                self._tts_queue.task_done()
+                # Drain any further queued triggers and keep only the most
+                # recent one — fatigue_state_node may have re-published the
+                # same (or a newer) trigger multiple times while we were busy
+                # with a previous conversation; we don't want to run a
+                # separate full conversation for each stale copy.
+                while True:
+                    try:
+                        code = self._tts_queue.get_nowait()
+                        self._tts_queue.task_done()
+                    except queue.Empty:
+                        break
             except queue.Empty:
+                pass
+
+            if code is not None:
+                self._try_claim_conversation('trigger')  # always succeeds: single thread
+                try:
+                    self._run_trigger_conversation(code, tts_engine, recogniser, microphone)
+                finally:
+                    self._release_conversation()
                 continue
 
-            # ── Optional attention wiggle ─────────────────────────────────────
-            if self._enable_cmd_vel and self._cmd_vel_pub is not None:
-                try:
-                    self._do_attention_wiggle()
-                except Exception as exc:
-                    rospy.logwarn('[feedback_controller_node] wiggle failed: %s', exc)
+            # -- 2. Otherwise, idle-poll for the wake phrase ----------------------
+            if recogniser is None or microphone is None:
+                rospy.sleep(0.5)
+                continue
 
-            # ── Open a DeepSeek chat session for this trigger ───────────────────
-            chat = self._open_deepseek_chat(code)
-            self._conversation_history = []
-            self._last_robot_message = ''
-            self._last_user_message = ''
+            heard = self._listen_short(recogniser, microphone, WAKE_LISTEN_TIMEOUT_SEC)
+            if not heard:
+                continue
 
-            # ── Conversation loop ─────────────────────────────────────────────
-            user_reply = None          # None on the very first turn
-            for turn in range(MAX_TURNS):
-                if rospy.is_shutdown():
-                    break
+            if not any(phrase in heard.lower() for phrase in WAKE_PHRASES):
+                continue  # not the wake phrase — ignore and keep polling
 
-                # -- 1. Get robot's next utterance from DeepSeek -----------------
-                robot_text = self._deepseek_next(chat, code, user_reply, turn)
-                self._last_robot_message = robot_text
-                self._conversation_history.append(f'Robot: {robot_text}')
-                self._publish_status()
+            rospy.loginfo('[feedback_controller_node] Wake phrase detected: "%s"', heard)
+            self._try_claim_conversation('wakeword')  # always succeeds: single thread
+            try:
+                self._run_wakeword_conversation(tts_engine, recogniser, microphone)
+            finally:
+                self._release_conversation()
 
-                # -- 2. Speak --------------------------------------------------
-                self._is_speaking = True
-                self._publish_status()
-                self._speak(tts_engine, robot_text)
-                self._is_speaking = False
-                self._publish_status()
+    def _run_trigger_conversation(self, code, tts_engine, recogniser, microphone):
+        """Full back-and-forth conversation for a fatigue/posture trigger."""
+        self._last_executed_trigger = code
 
-                # -- 3. Listen for user reply ----------------------------------
-                user_reply = self._listen(recogniser, microphone)
-                if user_reply is None:
-                    # No speech detected — end the conversation gracefully.
-                    rospy.loginfo('[feedback_controller_node] No reply heard; ending conversation.')
-                    break
+        # ── Optional attention wiggle ─────────────────────────────────────────
+        if self._enable_cmd_vel and self._cmd_vel_pub is not None:
+            try:
+                self._do_attention_wiggle()
+            except Exception as exc:
+                rospy.logwarn('[feedback_controller_node] wiggle failed: %s', exc)
 
-                rospy.loginfo('[feedback_controller_node] User said: "%s"', user_reply)
-                self._last_user_message = user_reply
-                self._conversation_history.append(f'User: {user_reply}')
-                self._publish_status()
+        # ── Open a DeepSeek chat session for this trigger ───────────────────────
+        chat = self._open_deepseek_chat(code)
+        self._conversation_history = []
+        self._last_robot_message = ''
+        self._last_user_message = ''
 
-                # -- 4. Check closing phrases ----------------------------------
-                if any(phrase in user_reply.lower() for phrase in CLOSING_PHRASES):
-                    # Say a brief goodbye then stop.
-                    goodbye = self._deepseek_goodbye(chat)
-                    self._last_robot_message = goodbye
-                    self._conversation_history.append(f'Robot: {goodbye}')
-                    self._publish_status()
-                    self._is_speaking = True
-                    self._publish_status()
-                    self._speak(tts_engine, goodbye)
-                    self._is_speaking = False
-                    self._publish_status()
-                    break
+        # ── Conversation loop ─────────────────────────────────────────────────
+        user_reply = None          # None on the very first turn
+        for turn in range(MAX_TURNS):
+            if rospy.is_shutdown():
+                break
 
-            # Reset and wait for next trigger.
-            self._tts_queue.task_done()
+            # -- 1. Get robot's next utterance from DeepSeek ---------------------
+            robot_text = self._deepseek_next(chat, code, user_reply, turn)
+            self._last_robot_message = robot_text
+            self._conversation_history.append(f'Robot: {robot_text}')
+            self._publish_status()
+
+            # -- 2. Speak ----------------------------------------------------
+            self._is_speaking = True
+            self._publish_status()
+            self._speak(tts_engine, robot_text)
+            self._is_speaking = False
+            self._publish_status()
+
+            # -- 3. Listen for user reply -------------------------------------
+            user_reply = self._listen(recogniser, microphone)
+            if user_reply is None:
+                # No speech detected — end the conversation gracefully.
+                rospy.loginfo('[feedback_controller_node] No reply heard; ending conversation.')
+                break
+
+            rospy.loginfo('[feedback_controller_node] User said: "%s"', user_reply)
+            self._last_user_message = user_reply
+            self._conversation_history.append(f'User: {user_reply}')
+            self._publish_status()
+
+        self._archive_current_conversation('trigger', code)
+
+    def _run_wakeword_conversation(self, tts_engine, recogniser, microphone):
+        """The actual back-and-forth loop once the wake phrase has been heard."""
+        code = TRIGGER_USER_INITIATED
+        chat = self._open_deepseek_chat(code)
+        self._conversation_history = []
+        self._last_robot_message = ''
+        self._last_user_message = ''
+        self._last_executed_trigger = code
+        self._publish_status()
+
+        user_reply = None
+        for turn in range(MAX_TURNS):
+            if rospy.is_shutdown():
+                break
+
+            # Fold in any reminder a trigger queued up while we were talking.
+            note = self._pending_trigger_note
+            self._pending_trigger_note = None
+
+            # -- 1. Get robot's next utterance from DeepSeek ---------------------
+            robot_text = self._deepseek_next(chat, code, user_reply, turn, note=note)
+            self._last_robot_message = robot_text
+            self._conversation_history.append(f'Robot: {robot_text}')
+            self._publish_status()
+
+            # -- 2. Speak ----------------------------------------------------
+            self._is_speaking = True
+            self._publish_status()
+            self._speak(tts_engine, robot_text)
+            self._is_speaking = False
+            self._publish_status()
+
+            # -- 3. Listen for user reply -------------------------------------
+            user_reply = self._listen(recogniser, microphone)
+            if user_reply is None:
+                rospy.loginfo('[feedback_controller_node] No reply heard; ending wake-word conversation.')
+                break
+
+            rospy.loginfo('[feedback_controller_node] User said: "%s"', user_reply)
+            self._last_user_message = user_reply
+            self._conversation_history.append(f'User: {user_reply}')
+            self._publish_status()
+
+        self._archive_current_conversation('wakeword', code)
+
+    def _listen_short(self, recogniser, microphone, timeout_sec: float) -> Optional[str]:
+        """
+        Like _listen, but quiet (no is_listening/status-publish churn) and
+        with a short, configurable timeout — used for idle wake-phrase
+        polling so it doesn't block trigger handling for long stretches.
+        """
+        try:
+            with microphone as source:
+                audio = recogniser.listen(source, timeout=timeout_sec, phrase_time_limit=6)
+            return recogniser.recognize_google(audio)
+        except sr.WaitTimeoutError:
+            return None
+        except sr.UnknownValueError:
+            return None
+        except sr.RequestError as exc:
+            rospy.logerr('[feedback_controller_node] Wake-word STT service error: %s', exc)
+            return None
+        except Exception as exc:
+            rospy.logerr('[feedback_controller_node] Wake-word listen error: %s', exc)
+            return None
 
     # ── DeepSeek helpers ────────────────────────────────────────────────────────
 
@@ -319,6 +555,17 @@ class FeedbackControllerNode:
             "Give brief, actionable posture tips if the user asks. "
             "When the user has confirmed they have fixed their posture, "
             "praise them and end the conversation naturally."
+        ),
+        TRIGGER_USER_INITIATED: (
+            "You are PostureBuddy, a friendly desk-companion robot. "
+            "The user just spoke to you on their own — they were not prompted by a "
+            "fatigue or posture alert. Chat naturally and help with whatever posture, "
+            "stretching, or general wellbeing question they bring up. "
+            "Keep every reply to 1-2 sentences. Be warm and conversational. "
+            "If the user seems finished, wish them well and end the conversation naturally. "
+            "You may occasionally receive a bracketed [System note: ...] in a user message — "
+            "that is not something the user said; weave its suggestion naturally into your "
+            "reply without quoting the note itself."
         ),
     }
 
@@ -341,10 +588,13 @@ class FeedbackControllerNode:
         # System prompt goes in as the first message with role "system".
         return [{"role": "system", "content": system}]
 
-    def _deepseek_next(self, chat, code: int, user_reply, turn: int) -> str:
+    def _deepseek_next(self, chat, code: int, user_reply, turn: int, note: Optional[str] = None) -> str:
         """
         Ask DeepSeek V4 Flash (via OpenRouter) what the robot should say next.
         On turn 0 `user_reply` is None — robot speaks first.
+        If `note` is given, it's prepended to the user-role message as a
+        bracketed system note (used to fold a pending trigger reminder into
+        an ongoing wake-word conversation without starting a new one).
         Appends the new user message and assistant reply to `chat` history.
         Returns a plain string to be spoken.
         """
@@ -358,6 +608,8 @@ class FeedbackControllerNode:
 
         try:
             user_msg = "Start the conversation." if turn == 0 else user_reply
+            if note:
+                user_msg = f"{note}\n{user_msg}"
             chat.append({"role": "user", "content": user_msg})
 
             response = _openrouter_client.chat.completions.create(
@@ -370,7 +622,10 @@ class FeedbackControllerNode:
             chat.append({"role": "assistant", "content": reply})
             return reply
         except Exception as exc:
-            rospy.logerr('[feedback_controller_node] OpenRouter request failed: %s', exc)
+            rospy.logerr(
+                '[feedback_controller_node] OpenRouter request failed (%s): %s',
+                type(exc).__name__, exc,
+            )
             return _FALLBACKS.get(code, "I have a reminder for you.")
 
     def _deepseek_goodbye(self, chat) -> str:
@@ -405,8 +660,7 @@ class FeedbackControllerNode:
         time.sleep(min(max(len(text) * 0.05, 0.5), 4.0))
 
     # ── Listen helper ─────────────────────────────────────────────────────────
-
-    def _listen(self, recogniser, microphone) -> str | None:
+    def _listen(self, recogniser, microphone) -> Optional[str]:
         """
         Listen for a user utterance and return its transcript, or None on
         timeout / error / STT unavailable.
