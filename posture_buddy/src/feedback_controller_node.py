@@ -18,7 +18,7 @@ Owner: Ruizhe
 
 import rospy
 from std_msgs.msg import Int32
-from posture_buddy.msg import HriStatus
+from posture_buddy.msg import HriStatus, PostureStatus
 
 # Optional motion
 from geometry_msgs.msg import Twist
@@ -88,6 +88,13 @@ class FeedbackControllerNode:
         # State
         self._last_executed_trigger = 0
         self._is_speaking           = False
+        self._last_robot_message    = ''
+        self._last_user_message     = ''
+        self._conversation_history  = []
+        self._current_posture       = 'ABSENT'
+        self._stretch_check_active   = False
+        self._stretch_check_started  = None
+        self._stretch_retry_count    = 0
 
         # Publishers
         self._pub = rospy.Publisher('/hri_execution_status', HriStatus, queue_size=10)
@@ -111,8 +118,9 @@ class FeedbackControllerNode:
         # Heartbeat so the dashboard always has fresh data
         rospy.Timer(rospy.Duration(1.0), self._heartbeat_cb)
 
-        # Subscriber last — all state is initialised before any callback fires
+        # Subscribers last — all state is initialised before any callback fires
         rospy.Subscriber('/hri_triggers', Int32, self._trigger_cb)
+        rospy.Subscriber('/posture_status', PostureStatus, self._posture_cb)
 
         # Extra state for two-way conversation
         self._is_listening = False
@@ -135,6 +143,14 @@ class FeedbackControllerNode:
         rospy.logwarn('[feedback_controller_node] Received trigger %d (%s)', code, label)
 
         self._last_executed_trigger = code
+        self._last_robot_message = ''
+        self._last_user_message = ''
+        self._conversation_history = []
+
+        if code == TRIGGER_STRETCH_REMINDER:
+            self._stretch_check_active = True
+            self._stretch_check_started = rospy.Time.now()
+            self._stretch_retry_count = 0
 
         # Push trigger to TTS/conversation worker (non-blocking).
         # The worker itself calls DeepSeek for the opening line and then
@@ -146,6 +162,31 @@ class FeedbackControllerNode:
 
         # Update dashboard immediately
         self._publish_status()
+
+    # ── Posture monitoring ───────────────────────────────────────────────────
+    def _posture_cb(self, msg):
+        self._current_posture = msg.posture_state
+
+        if self._stretch_check_active and self._current_posture == 'GOOD':
+            # User has improved enough; stop the stretch re-check loop.
+            self._stretch_check_active = False
+            self._stretch_check_started = None
+            self._stretch_retry_count = 0
+            return
+
+        if (
+            self._stretch_check_active
+            and self._stretch_check_started is not None
+            and (rospy.Time.now() - self._stretch_check_started).to_sec() >= 30.0
+            and self._stretch_retry_count < 2
+        ):
+            # If the user still has not improved after a short window, prompt again.
+            self._stretch_retry_count += 1
+            self._stretch_check_started = rospy.Time.now()
+            try:
+                self._tts_queue.put_nowait(TRIGGER_STRETCH_REMINDER)
+            except queue.Full:
+                rospy.logwarn('[feedback_controller_node] Stretch re-check queue full; skipping reminder.')
 
     # ── TTS / conversation worker ─────────────────────────────────────────────
     def _tts_worker(self):
@@ -207,6 +248,9 @@ class FeedbackControllerNode:
 
             # ── Open a DeepSeek chat session for this trigger ───────────────────
             chat = self._open_deepseek_chat(code)
+            self._conversation_history = []
+            self._last_robot_message = ''
+            self._last_user_message = ''
 
             # ── Conversation loop ─────────────────────────────────────────────
             user_reply = None          # None on the very first turn
@@ -216,6 +260,9 @@ class FeedbackControllerNode:
 
                 # -- 1. Get robot's next utterance from DeepSeek -----------------
                 robot_text = self._deepseek_next(chat, code, user_reply, turn)
+                self._last_robot_message = robot_text
+                self._conversation_history.append(f'Robot: {robot_text}')
+                self._publish_status()
 
                 # -- 2. Speak --------------------------------------------------
                 self._is_speaking = True
@@ -232,11 +279,17 @@ class FeedbackControllerNode:
                     break
 
                 rospy.loginfo('[feedback_controller_node] User said: "%s"', user_reply)
+                self._last_user_message = user_reply
+                self._conversation_history.append(f'User: {user_reply}')
+                self._publish_status()
 
                 # -- 4. Check closing phrases ----------------------------------
                 if any(phrase in user_reply.lower() for phrase in CLOSING_PHRASES):
                     # Say a brief goodbye then stop.
                     goodbye = self._deepseek_goodbye(chat)
+                    self._last_robot_message = goodbye
+                    self._conversation_history.append(f'Robot: {goodbye}')
+                    self._publish_status()
                     self._is_speaking = True
                     self._publish_status()
                     self._speak(tts_engine, goodbye)
@@ -413,6 +466,9 @@ class FeedbackControllerNode:
         out = HriStatus()
         out.is_speaking           = self._is_speaking
         out.last_executed_trigger = self._last_executed_trigger
+        out.robot_message         = self._last_robot_message
+        out.user_message          = self._last_user_message
+        out.conversation          = self._conversation_history
         self._pub.publish(out)
 
     # ── Spin ──────────────────────────────────────────────────────────────────

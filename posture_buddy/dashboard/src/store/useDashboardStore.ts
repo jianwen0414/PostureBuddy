@@ -18,6 +18,7 @@ const TIMELINE_CAPACITY = 240   // ~4 minutes of 1 Hz samples — bounded ring
 interface DashboardStore extends DashboardState {
   alerts: AlertEntry[]
   wellnessStats: WellnessStats
+  conversation: string[]
   _lastTrigger: number
   cameraFrame: string | null
   cameraTopicName: string
@@ -51,6 +52,7 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   lastUpdatedAt: null,
   alerts: [],
   wellnessStats: initialWellness,
+  conversation: [],
   _lastTrigger: 0,
   cameraFrame: null,
   cameraTopicName: process.env.NEXT_PUBLIC_CAMERA_TOPIC ?? '/camera/image_raw/compressed',
@@ -142,6 +144,7 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
         : 'Idle',
       lastUpdatedAt: Date.now(),
       alerts: newAlerts,
+      conversation: msg.conversation ?? state.conversation,
       _lastTrigger: shouldAdd ? incomingTrigger : state._lastTrigger,
     })
   },

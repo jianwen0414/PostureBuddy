@@ -11,6 +11,9 @@ export interface RosFatigueMetricsMsg {
 export interface RosHriStatusMsg {
   is_speaking: boolean
   last_executed_trigger: number
+  robot_message?: string
+  user_message?: string
+  conversation?: string[]
 }
 
 export interface RosBridgeMessage<T = unknown> {
