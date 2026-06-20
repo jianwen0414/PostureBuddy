@@ -83,6 +83,12 @@ MAX_TURNS = 5
 # Seconds to wait for the user to speak before giving up.
 LISTEN_TIMEOUT_SEC = 8
 
+# Seconds to keep the just-finished conversation visible on the dashboard
+# after a posture-recovered praise line, before clearing it for the next
+# session. A new real trigger (stretch/posture alert) cancels this hold
+# immediately rather than waiting it out.
+POST_PRAISE_HOLD_SEC = 30.0
+
 # ── Wake-word (user-initiated) conversation tuning ────────────────────────────
 # Phrases that start a user-initiated conversation when heard while idle.
 # Simple substring match on the STT transcript — no extra wake-word engine needed.
@@ -98,11 +104,16 @@ TRIGGER_USER_INITIATED = -1
 TRIGGER_IDLE              = 0
 TRIGGER_STRETCH_REMINDER  = 1
 TRIGGER_POSTURE_ALERT     = 2
+# Internal-only trigger (never published by fatigue_state_node) — fired locally
+# by _posture_cb when posture flips to GOOD while a stretch check was active,
+# so the robot can react/praise instead of silently resetting.
+TRIGGER_POSTURE_RECOVERED = 3
 
 # Human-readable labels used in log output
 TRIGGER_LABELS = {
-    TRIGGER_STRETCH_REMINDER: 'Gentle Stretch Reminder',
-    TRIGGER_POSTURE_ALERT:    'Strong Posture Correction Alert',
+    TRIGGER_STRETCH_REMINDER:  'Gentle Stretch Reminder',
+    TRIGGER_POSTURE_ALERT:     'Strong Posture Correction Alert',
+    TRIGGER_POSTURE_RECOVERED: 'Posture Recovered Praise',
 }
 
 
@@ -121,6 +132,13 @@ class FeedbackControllerNode:
         self._stretch_check_active   = False
         self._stretch_check_started  = None
         self._stretch_retry_count    = 0
+
+        # Post-praise dashboard hold: after TRIGGER_POSTURE_RECOVERED speaks,
+        # the conversation stays visible for POST_PRAISE_HOLD_SEC instead of
+        # being wiped immediately. None = no hold pending. A new real trigger
+        # (stretch/posture alert) cancels the hold and clears it early.
+        self._praise_hold_until = None
+        self._praise_hold_lock  = threading.Lock()
 
         # Rolling record of the 10 most recently COMPLETED conversations
         # (kept separate from the live _conversation_history, which only
@@ -250,6 +268,7 @@ class FeedbackControllerNode:
             }.get(code)
             if note:
                 self._pending_trigger_note = note
+                self._cancel_praise_hold()
                 rospy.loginfo(
                     '[feedback_controller_node] Folding trigger %d into ongoing '
                     'wake-word conversation instead of starting a new one.', code,
@@ -266,6 +285,7 @@ class FeedbackControllerNode:
         if self._conversation_source_is('trigger'):
             try:
                 self._tts_queue.put_nowait(code)
+                self._cancel_praise_hold()
                 rospy.loginfo(
                     '[feedback_controller_node] Trigger %d queued — a conversation '
                     'is already in progress, will run after it finishes.', code,
@@ -274,6 +294,7 @@ class FeedbackControllerNode:
                 rospy.logwarn('[feedback_controller_node] TTS queue full; dropping trigger.')
             return
 
+        self._cancel_praise_hold()
         self._last_executed_trigger = code
         self._last_robot_message = ''
         self._last_user_message = ''
@@ -295,10 +316,22 @@ class FeedbackControllerNode:
         self._current_posture = msg.posture_state
 
         if self._stretch_check_active and self._current_posture == 'GOOD':
-            # User has improved enough; stop the stretch re-check loop.
+            # User has improved enough; stop the stretch re-check loop and
+            # let the robot react/praise instead of resetting silently.
             self._stretch_check_active = False
             self._stretch_check_started = None
             self._stretch_retry_count = 0
+            if not self._conversation_source_is('wakeword'):
+                # Queues behind any in-progress trigger conversation rather
+                # than interrupting it (same queue/worker as every other
+                # trigger — see _trigger_cb / _conversation_worker).
+                try:
+                    self._tts_queue.put_nowait(TRIGGER_POSTURE_RECOVERED)
+                except queue.Full:
+                    rospy.logwarn(
+                        '[feedback_controller_node] TTS queue full; '
+                        'skipping posture-recovered praise.'
+                    )
             return
 
         if (
@@ -431,6 +464,36 @@ class FeedbackControllerNode:
             except Exception as exc:
                 rospy.logwarn('[feedback_controller_node] wiggle failed: %s', exc)
 
+        # ── Single reactive line, no back-and-forth ───────────────────────────
+        # Posture-recovered praise is a momentary reaction, not the start of a
+        # new conversation. It APPENDS to whatever conversation is already on
+        # the dashboard (e.g. the stretch-reminder chat that led here) instead
+        # of wiping it, then holds the dashboard as-is for POST_PRAISE_HOLD_SEC
+        # so the praise visibly lands in that same session before clearing.
+        if code == TRIGGER_POSTURE_RECOVERED:
+            chat = self._open_deepseek_chat(code)
+            robot_text = self._deepseek_next(chat, code, None, 0)
+            self._last_robot_message = robot_text
+            self._conversation_history.append(f'Robot: {robot_text}')
+            self._publish_status()
+
+            self._is_speaking = True
+            self._publish_status()
+            self._speak(tts_engine, robot_text)
+            self._is_speaking = False
+            self._publish_status()
+
+            self._archive_current_conversation('trigger', code)
+
+            with self._praise_hold_lock:
+                self._praise_hold_until = rospy.Time.now().to_sec() + POST_PRAISE_HOLD_SEC
+            return
+
+        # ── Real trigger (stretch reminder / posture alert) ──────────────────
+        # A genuine new trigger always wins over a pending praise hold — clear
+        # it immediately rather than waiting out the 30s.
+        self._cancel_praise_hold()
+
         # ── Open a DeepSeek chat session for this trigger ───────────────────────
         chat = self._open_deepseek_chat(code)
         self._conversation_history = []
@@ -556,6 +619,15 @@ class FeedbackControllerNode:
             "When the user has confirmed they have fixed their posture, "
             "praise them and end the conversation naturally."
         ),
+        TRIGGER_POSTURE_RECOVERED: (
+            "You are PostureBuddy, a friendly desk-companion robot. "
+            "The user just fixed their posture on their own — no alert is active "
+            "anymore, you're simply noticing and reacting in the moment. "
+            "Say one short, warm, varied line of genuine praise or encouragement "
+            "(e.g. acknowledging they're sitting up straight now). "
+            "Do NOT ask a question and do NOT expect a reply — "
+            "this is a single reactive line, not the start of a conversation."
+        ),
         TRIGGER_USER_INITIATED: (
             "You are PostureBuddy, a friendly desk-companion robot. "
             "The user just spoke to you on their own — they were not prompted by a "
@@ -599,8 +671,9 @@ class FeedbackControllerNode:
         Returns a plain string to be spoken.
         """
         _FALLBACKS = {
-            TRIGGER_STRETCH_REMINDER: "Time for a quick stretch — stand up and move around a little!",
-            TRIGGER_POSTURE_ALERT:    "Please sit up straight and check your posture right now.",
+            TRIGGER_STRETCH_REMINDER:  "Time for a quick stretch — stand up and move around a little!",
+            TRIGGER_POSTURE_ALERT:     "Please sit up straight and check your posture right now.",
+            TRIGGER_POSTURE_RECOVERED: "Great job, your posture looks much better now!",
         }
 
         if chat is None or _openrouter_client is None:
@@ -713,7 +786,39 @@ class FeedbackControllerNode:
 
     # ── Heartbeat ─────────────────────────────────────────────────────────────
     def _heartbeat_cb(self, _event):
+        self._check_praise_hold_expired()
         self._publish_status()
+
+    def _check_praise_hold_expired(self):
+        """
+        If a post-praise dashboard hold is active and POST_PRAISE_HOLD_SEC has
+        elapsed, clear the conversation so the dashboard is ready for a fresh
+        session. No-op if no hold is pending (the common case).
+        """
+        with self._praise_hold_lock:
+            if self._praise_hold_until is None:
+                return
+            if rospy.Time.now().to_sec() < self._praise_hold_until:
+                return
+            self._praise_hold_until = None
+
+        # Only clear if nothing new has started speaking/listening in the
+        # meantime (a fresh trigger cancels the hold itself before this could
+        # fire, but this guard is cheap insurance against a race).
+        if not self._conversation_active:
+            self._conversation_history = []
+            self._last_robot_message = ''
+            self._last_user_message = ''
+            rospy.loginfo(
+                '[feedback_controller_node] Post-praise hold expired — '
+                'dashboard cleared, ready for next session.'
+            )
+
+    def _cancel_praise_hold(self):
+        """Cancel any pending post-praise hold (called when a new real
+        trigger needs the dashboard immediately instead of waiting it out)."""
+        with self._praise_hold_lock:
+            self._praise_hold_until = None
 
     # ── Publish helper ────────────────────────────────────────────────────────
     def _publish_status(self):
