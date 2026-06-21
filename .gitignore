@@ -9,3 +9,6 @@ CLAUDE.md
 .vscode/
 
 .env
+
+# Project spec — kept locally, not tracked
+PostureBuddy specification.md
