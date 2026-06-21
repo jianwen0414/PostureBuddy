@@ -1,0 +1,22 @@
+# PostureBuddy — Python dependencies for the ROS nodes (Module 1-4).
+# Install on the robot / ROS Noetic machine (Python 3.8+):
+#   pip3 install -r requirements.txt
+#
+# NOTE: PyAudio (the mic backend for SpeechRecognition in Module 4) needs
+# system packages first on Ubuntu, or the pip build fails:
+#   sudo apt install portaudio19-dev python3-pyaudio
+#
+# ROS packages (usb_cam, rosbridge_suite, cv_bridge) are installed via apt,
+# NOT pip — see README. cv_bridge ships with ros-noetic-cv-bridge.
+
+# ── Module 1: Vision & Kinematics ────────────────────────────────────────────
+mediapipe            # BlazePose pose estimation
+opencv-python        # image conversion / skeleton overlay
+numpy                # CompressedImage buffer handling
+
+# ── Module 4: HRI & Actuation ────────────────────────────────────────────────
+pyttsx3              # offline text-to-speech
+SpeechRecognition    # mic capture + Google online STT (recognize_google)
+PyAudio              # microphone backend for SpeechRecognition (needs portaudio, see above)
+openai               # OpenAI-compatible client used against OpenRouter
+python-dotenv        # loads OPENROUTER_API_KEY from src/.env
